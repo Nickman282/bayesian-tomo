@@ -148,11 +148,13 @@ class Dataset:
         '''
 
         scale_file_dirs = glob(f"{self.main_path}/*/*/*/*.dcm")
-        junk_x_space = []
-        junk_y_space = []
+        init_x_pos = []
+        init_y_pos = []
+        opp_x_pos = []
+        opp_y_pos = []
+        len_x_disp = []
+        len_y_disp = []
         mean_kvp_arr = []
-        scale_array = []
-        opp_scale_array = []
         for slice_filepath in tqdm(scale_file_dirs):
                 slice_file = pydicom.dcmread(slice_filepath)              
                 
@@ -166,37 +168,49 @@ class Dataset:
                         y_space = slice_file[0x0028,0x0030].value[1]
                         y_disp = slice_file[0x0020, 0x0032].value[1] + orientation[4]*y_space*512
 
-                        opp_scale_array.append([x_disp, y_disp])
-                        scale_array.append(slice_file[0x0020, 0x0032].value[:2])
+                        init_x_pos.append(slice_file[0x0020, 0x0032].value[0])
+                        init_y_pos.append(slice_file[0x0020, 0x0032].value[1])
+                        opp_x_pos.append(x_disp)
+                        opp_y_pos.append(y_disp)
+                        len_x_disp.append(x_space*512)
+                        len_y_disp.append(y_space*512)
                         mean_kvp_arr.append(slice_file[0x0018,0x0060].value)
-                        junk_x_space.append(x_space)
-                        junk_y_space.append(y_space)
-
-
-        scale_array = np.array(scale_array)
-        opp_scale_array = np.array(opp_scale_array)
-        norm_array = []
-        for i in range(len(scale_array)):
-            norm_array.append(np.linalg.norm(scale_array[i] - opp_scale_array[i]))
-        norm_array = np.array(norm_array)
         
-        # Mode l2-nor between corners
-        vals_diag, indices_diag = np.unique(norm_array, return_index=True)
-        self.mode_norm = vals_diag[np.argsort(indices_diag)][0]
+        # Mode upper-left corner positions (in mm)
+        vals_xup, indices_xup = np.unique(init_x_pos, return_index=True)
+        self.mode_xup = vals_xup[np.argsort(indices_xup)][-1]
+        print(f"Mode upper-left x: {self.mode_xup}")
 
-        # Mode pixel centre separation
-        vals_x, indices_x = np.unique(junk_x_space, return_index=True)
-        self.mode_x = vals_x[np.argsort(indices_x)][0]*512        
+        vals_yup, indices_yup = np.unique(init_y_pos, return_index=True)
+        self.mode_yup = vals_yup[np.argsort(indices_yup)][-1]
+        print(f"Mode upper-left y: {self.mode_yup}")
 
-        vals_y, indices_y = np.unique(junk_y_space, return_index=True)
-        self.mode_y = vals_y[np.argsort(indices_y)][0]*512     
+        # Mode bottom-right corner positions (in mm)
+        vals_xlo, indices_xlo = np.unique(opp_x_pos, return_index=True)
+        self.mode_xlo = vals_xlo[np.argsort(indices_xlo)][-1]
+        print(f"Mode bottom-right x: {self.mode_xlo}")
 
-        vals_scale, indices_scale = np.unique(scale_array, return_index=True)
-        self.mode_scale = vals_scale[np.argsort(indices_scale)][0]
+        vals_ylo, indices_ylo = np.unique(opp_y_pos, return_index=True)
+        self.mode_ylo = vals_ylo[np.argsort(indices_ylo)][-1]
+        print(f"Mode bottom-right y: {self.mode_xlo}")
+
+        # Mode image dimensions (in mm)
+        vals_x, indices_x = np.unique(len_x_disp, return_index=True)
+        self.mode_x = vals_x[np.argsort(indices_x)][-1]
+        print(f"Mode dimensions x: {self.mode_xlo}")       
+
+        vals_y, indices_y = np.unique(len_y_disp, return_index=True)
+        self.mode_y = vals_y[np.argsort(indices_y)][-1]  
+        print(f"Mode dimensions y: {self.mode_xlo}")   
 
         # Mean KVP of images
         self.mean_kvp = np.array(mean_kvp_arr).mean()
         print(f"Mean KVP: {self.mean_kvp}")
+
+        # Based on mean KVP of 120 kV, the attenuation coefficient of water is estimated to be approx. 3.25 cm^-1
+        # Data extraploated from "https://physics.nist.gov/PhysRefData/XrayMassCoef/ComTab/water.html"
+
+        self.mu_water = 3.25
 
         return None
     
@@ -215,8 +229,8 @@ class Dataset:
         intercept = data_element[self.col_names[6]]
         slope = data_element[self.col_names[7]]
 
-        #print(f"Intercept: {intercept}")
-        #print(f"Slope: {slope}")
+        print(f"Intercept: {intercept}")
+        print(f"Slope: {slope}")
 
         if intercept <= -1000:
             pixel_array[pixel_array == -2000] = 0
@@ -229,77 +243,128 @@ class Dataset:
         position = np.array(position[:2])
         opp_position = np.array([x_disp, y_disp])
 
-        #print(f"Position: {position}")
-        #print(f"Opp. Position: {opp_position}")
+        print(f"Position: {position}")
+        print(f"Opp. Position: {opp_position}")
 
-        diag_val = np.linalg.norm(position - opp_position)
+        # Image dimensions (in mm)
         xy_displacement = pixel_spacing*512
 
         x_ratio = self.mode_x/xy_displacement[0]
-        y_ratio = self.mode_y/xy_displacement[1]
+        y_ratio = self.mode_y/xy_displacement[1]   
 
-        #print(f"X Ratio: {x_ratio}")
-        #print(f"Y Ratio: {y_ratio}")       
+        print(f"X Ratio: {x_ratio}")
+        print(f"Y Ratio: {y_ratio}")     
 
-        if diag_val > (self.mode_norm + 5):
-            #print("Subsampling:")
+        # Displacement index
+        disp_X = round(abs(position[0]-self.mode_xup)/pixel_spacing[0])
+        disp_Y = round(abs(position[1]-self.mode_yup)/pixel_spacing[1])
 
-            region_selected_X = round(512*(1-x_ratio)/2)
-            region_selected_Y = round(512*(1-y_ratio)/2)
+        opp_disp_X = round(abs(opp_position[0]-self.mode_xlo)/pixel_spacing[0])
+        opp_disp_Y = round(abs(opp_position[1]-self.mode_ylo)/pixel_spacing[1])
 
-            #print(f"Region selected X: {region_selected_X}")
-            #print(f"Region selected Y: {region_selected_Y}")
+        try:
+            if x_ratio < 0.95:
 
-            pixel_array = pixel_array[region_selected_X:512 - region_selected_X, region_selected_Y:512 - region_selected_Y]
+                if y_ratio < 0.95:
 
-        elif diag_val < (self.mode_norm - 5):
-            #print("Supersampling:")
-            dims_X = round(512*x_ratio)
-            dims_Y = round(512*y_ratio)    
+                    pixel_array = pixel_array[disp_X:512-opp_disp_X, disp_Y:512-opp_disp_Y]
 
-            if dims_X % 2 != 0 or dims_Y % 2 != 0:
-                dims_X += 1
-                dims_Y += 1
+                elif y_ratio > 1.05:
 
-            #print(f"New Image Dims X: {dims_X}")
-            #print(f"New Image Dims Y: {dims_Y}")
+                    dims_Y = round(512*y_ratio) 
+                    if dims_Y % 2 != 0:
+                        dims_Y += 1
 
-            temp_array = np.zeros((dims_X, dims_Y))    
+                    temp_array = np.zeros((dims_X, dims_Y))
+                    temp_array[:, disp_Y: dims_Y-opp_disp_Y] = pixel_array[disp_X:512-opp_disp_X, :]
+                    pixel_array = temp_array
 
-            region_selected_X = round((dims_X - 512)/2)
-            region_selected_Y = round((dims_Y - 512)/2)
+                else:
 
-            #print(f"Region selected X: {region_selected_X}")
-            #print(f"Region selected Y: {region_selected_Y}")
+                    pixel_array = pixel_array[disp_X:512-opp_disp_X, :]
 
-            temp_array[region_selected_X:dims_X - region_selected_X, region_selected_Y:dims_Y - region_selected_Y] = pixel_array[:, :]
+            elif x_ratio > 1.05:
 
-            pixel_array = temp_array
+                if y_ratio < 0.95:
 
-        centre = np.floor((512-1)/2)
+                    dims_X = round(512*x_ratio) 
+                    if dims_X % 2 != 0:
+                        dims_X += 1
 
-        # Set all out of range pixels back to -1024 
-        for i in range(pixel_array.shape[0]):
-            for j in range(pixel_array.shape[1]):
-                arg_dist = round(np.sqrt((centre - i)**2 + (centre - j)**2))
-                if arg_dist > centre:
-                    pixel_array[i, j] = -1024
+                    temp_array = np.zeros((dims_X, dims_Y))
+                    temp_array[disp_X: dims_X-opp_disp_X, :] = pixel_array[:, disp_Y:512-opp_disp_Y]
+                    pixel_array = temp_array
 
-        # Normalize image to 0 -> 1 range
-        #print(f"Image Maximum: {pixel_array.max()}")
-        #print(f"Image Minimum: {pixel_array.min()}")
-        MIN = pixel_array.max()
-        MAX = pixel_array.min()
-        pixel_array = pixel_array/(MIN - MAX)
+                elif y_ratio > 1.05:
 
-        # Rescale image to 256x256 pixels with an anti-aliasing filter
-        im_array = Image.fromarray(np.float32(pixel_array))
-        im_resized = im_array.resize((256, 256))
-        pixel_array = np.array(im_resized)
+                    dims_X = round(512*x_ratio)
+                    dims_Y = round(512*y_ratio) 
 
-        pixel_array = pixel_array*(MAX - MIN)
-        return pixel_array
+                    if dims_X % 2 != 0 or dims_Y % 2 != 0:
+                        dims_X += 1
+                        dims_Y += 1
 
+                    temp_array = np.zeros((dims_X, dims_Y))
+                    temp_array[disp_X:dims_X - opp_disp_X, disp_Y:dims_Y - opp_disp_Y] = pixel_array[:, :]
+                    pixel_array = temp_array
+
+                else: 
+
+                    dims_X = round(512*x_ratio)
+                    if dims_X % 2 != 0:
+                        dims_X += 1
+
+                    temp_array = np.zeros((dims_X, 512))
+                    temp_array[disp_X: dims_X-opp_disp_X, :] = pixel_array[:, :]
+
+            elif y_ratio < 0.95:
+
+                pixel_array = pixel_array[:, disp_Y:512-opp_disp_Y]
+
+            elif y_ratio > 1.05:
+
+                dims_Y = round(512*y_ratio)   
+
+                if dims_Y % 2 != 0:
+                    dims_Y += 1
+
+                temp_array = np.zeros((512, dims_Y)) 
+                temp_array[:, disp_Y:dims_Y - opp_disp_Y] = pixel_array[:, :]
+                pixel_array = temp_array
+
+
+
+            centre = np.floor((512-1)/2)
+
+            # Set all out of range pixels back to -1024 
+            for i in range(pixel_array.shape[0]):
+                for j in range(pixel_array.shape[1]):
+                    arg_dist = round(np.sqrt((centre - i)**2 + (centre - j)**2))
+                    if arg_dist > centre:
+                        pixel_array[i, j] = -1024
+
+            # Normalize image to 0 -> 1 range
+            print(f"Image Maximum: {pixel_array.max()}")
+            print(f"Image Minimum: {pixel_array.min()}")
+            MIN = pixel_array.max()
+            MAX = pixel_array.min()
+            pixel_array = pixel_array/(MAX - MIN)
+
+            # Rescale image to 256x256 pixels 
+            im_array = Image.fromarray(np.float32(pixel_array))
+            im_resized = im_array.resize((256, 256))
+            pixel_array = np.array(im_resized)
+
+            # Normalize to give att. coefficient mu of the material
+            pixel_array = pixel_array*(MAX - MIN)
+            pixel_array = pixel_array/1000*self.mu_water + self.mu_water
+            return pixel_array
+        
+        except:
+            return None
+
+
+        '''   
     def rescale_prior(self):
         
         holder = pd.DataFrame(columns=["Index", f"{self.col_names[-1]} (Norm)"])
@@ -310,14 +375,14 @@ class Dataset:
 
             temp_array = []
             for i in range(patient_array.shape[0]):
-                self.rescaler(data_element = patient_array.iloc[i])
+                temp_pix = self.rescaler(data_element = patient_array.iloc[i])
+                temp_array.append(temp_pix)
 
             patient_array = np.stack(temp_array, axis=0)
-
             is_patient_idx = np.array(np.where(is_patient)).ravel()
 
             temp = pd.DataFrame(columns=["Index", f"{self.col_names[-1]} (Norm)"]) #, columns=["Index", f"{self.col_names[-1]} (Norm)"]
-
+            print(patient_array.shape)
             temp[f"{self.col_names[-1]} (Norm)"] = patient_array.tolist()
             temp["Index"] = is_patient_idx.tolist()
 
@@ -327,8 +392,10 @@ class Dataset:
         holder.sort_index(axis=0, inplace = True)
         self.dataframe = self.dataframe.join(holder)
         self.col_names = list(self.dataframe.columns.values)
+        print(self.dataframe)
         return None
-    
+        ''' 
+
     def prior_loader(self, chunk_size, tag_list=None): #col, func, 
         first_moments_list = []
         second_moments_list = []
@@ -342,23 +409,32 @@ class Dataset:
             self.chunk_loadin(chunk_size, chunk_ind=i, tag_list=tag_list)
 
             self.selector(col=1, func=select_slice)
-            self.rescale_prior()
-
-            self.actual_chunk_size = len(self.patient_ids)
-            chunk_size_list.append(self.actual_chunk_size)
-            curr_total_size += self.actual_chunk_size
+            #self.rescale_prior()
 
             patient_intensity_avg = []
 
             for patient in self.patient_ids:
+                temp_pixels_norm = []
                 is_patient_filtered = (self.dataframe['Patient ID'] == patient)
-                patient_slices = self.dataframe.loc[is_patient_filtered, self.col_names[-1]]
+                patient_slices = self.dataframe.loc[is_patient_filtered]
+                for i in range(patient_slices.shape[0]):
+                    out = self.rescaler(data_element = patient_slices.iloc[i])
+                    if out is not None:
+                        temp_pixels_norm.append(out)
 
-                patient_slices = np.stack(patient_slices.to_numpy()).mean(axis=0)
-
-                patient_intensity_avg.append(patient_slices.ravel())
+                try:
+                    patient_slices = np.stack(temp_pixels_norm).mean(axis=0)
+                    print(patient_slices.shape)
+                    patient_intensity_avg.append(patient_slices.ravel())
+                except:
+                    continue
 
             patient_intensity_avg = np.array(patient_intensity_avg)
+
+            self.actual_chunk_size = patient_intensity_avg.shape[0]
+            chunk_size_list.append(self.actual_chunk_size)
+            curr_total_size += self.actual_chunk_size
+
             print(f"Chunk Data Shape: {patient_intensity_avg.shape}")
 
             print(f"Current chunk index: {i}")
@@ -374,13 +450,13 @@ class Dataset:
 
             # Second Moment Update
             print("Second Moment Update Progress:")
-            for sub_i in tqdm(range(512)):
-                sec_st_i = 512*sub_i
-                sec_en_i = 512*sub_i + 512
+            for sub_i in tqdm(range(256)):
+                sec_st_i = 256*sub_i
+                sec_en_i = 256*sub_i + 256
 
-                for sub_j in range(512):
-                    sec_st_j = 512*sub_j
-                    sec_en_j = 512*sub_j + 512
+                for sub_j in range(256):
+                    sec_st_j = 256*sub_j
+                    sec_en_j = 256*sub_j + 256
 
                     N = patient_intensity_avg.shape[0]
                     temp_second_moment = (1/N)*(patient_intensity_avg.T[sec_st_i : sec_en_i] @ patient_intensity_avg[:, sec_st_j : sec_en_j])
@@ -423,14 +499,17 @@ tag_list = [[0x0020, 0x0032],
 
 
 dataset = Dataset(main_path=main_path)
-dataset.chunk_loadin(chunk_size=10, tag_list=tag_list)
-dataset.selector(col=1, func=select_slice)
-empty_array = []
-for i in range(dataset.dataframe.shape[0]):
-    empty_array.append(dataset.rescaler(data_element=dataset.dataframe.iloc[i]))
-empty_array = np.array(empty_array)
+dataset.prior_loader(chunk_size=75, tag_list=tag_list)
 
-imageio.mimsave('D:/Studies/MEng_Project/test_file20.gif', empty_array, duration=1000)
+#dataset.chunk_loadin(chunk_size=10, tag_list=tag_list)
+#dataset.selector(col=1, func=select_slice)
+#empty_array = []
+#for i in range(dataset.dataframe.shape[0]):
+#    empty_array.append(dataset.rescaler(data_element=dataset.dataframe.iloc[i]))
+#empty_array = np.array(empty_array)
+
+#imageio.mimsave('D:/Studies/MEng_Project/test_file25.gif', empty_array, duration=1000)
+
 
 #print(np.unique(x_array))
 #print(np.unique(y_array))
