@@ -41,7 +41,7 @@ mem_file = Path('D:/Studies/MEng_Project/LIDC-IDRI/cov_mat.mymemmap')
 mem_file_2 = Path('D:/Studies/MEng_Project/LIDC-IDRI/means.mymemmap')
 
 first_moment_path = np.memmap(filename = mem_file_2, dtype='float32', mode='w+', shape=256**2)
-second_moment_path = np.memmap(filename = mem_file, dtype='float32', mode='w+', shape=(256**2,256**2))
+second_moment_path = np.memmap(filename = mem_file, dtype='float32', mode='w+', shape=(256**2, 256**2))
 
 
 # Create a Dataset class to extract and hold relevant information from the dataset
@@ -229,8 +229,8 @@ class Dataset:
         intercept = data_element[self.col_names[6]]
         slope = data_element[self.col_names[7]]
 
-        print(f"Intercept: {intercept}")
-        print(f"Slope: {slope}")
+        #print(f"Intercept: {intercept}")
+        #print(f"Slope: {slope}")
 
         if intercept <= -1000:
             pixel_array[pixel_array == -2000] = 0
@@ -243,8 +243,8 @@ class Dataset:
         position = np.array(position[:2])
         opp_position = np.array([x_disp, y_disp])
 
-        print(f"Position: {position}")
-        print(f"Opp. Position: {opp_position}")
+        #print(f"Position: {position}")
+        #print(f"Opp. Position: {opp_position}")
 
         # Image dimensions (in mm)
         xy_displacement = pixel_spacing*512
@@ -252,8 +252,8 @@ class Dataset:
         x_ratio = self.mode_x/xy_displacement[0]
         y_ratio = self.mode_y/xy_displacement[1]   
 
-        print(f"X Ratio: {x_ratio}")
-        print(f"Y Ratio: {y_ratio}")     
+        #print(f"X Ratio: {x_ratio}")
+        #print(f"Y Ratio: {y_ratio}")     
 
         # Displacement index
         disp_X = round(abs(position[0]-self.mode_xup)/pixel_spacing[0])
@@ -332,22 +332,13 @@ class Dataset:
                 temp_array[:, disp_Y:dims_Y - opp_disp_Y] = pixel_array[:, :]
                 pixel_array = temp_array
 
-
-
-            centre = np.floor((512-1)/2)
-
-            # Set all out of range pixels back to -1024 
-            for i in range(pixel_array.shape[0]):
-                for j in range(pixel_array.shape[1]):
-                    arg_dist = round(np.sqrt((centre - i)**2 + (centre - j)**2))
-                    if arg_dist > centre:
-                        pixel_array[i, j] = -1024
-
             # Normalize image to 0 -> 1 range
-            print(f"Image Maximum: {pixel_array.max()}")
-            print(f"Image Minimum: {pixel_array.min()}")
+            #print(f"Image Maximum: {pixel_array.max()}")
+            #print(f"Image Minimum: {pixel_array.min()}")
+
             MIN = pixel_array.max()
             MAX = pixel_array.min()
+
             pixel_array = pixel_array/(MAX - MIN)
 
             # Rescale image to 256x256 pixels 
@@ -355,46 +346,60 @@ class Dataset:
             im_resized = im_array.resize((256, 256))
             pixel_array = np.array(im_resized)
 
-            # Normalize to give att. coefficient mu of the material
+            # Normalize to give att. coefficient mu of the material, then to 0->1
             pixel_array = pixel_array*(MAX - MIN)
             pixel_array = pixel_array/1000*self.mu_water + self.mu_water
+
+            pixel_array = 1000*(pixel_array - pixel_array.min())/(pixel_array.max()-pixel_array.min()) 
+            #pixel_array[pixel_array <= 0] = 0
+            # Assuming log-normal distribution of the data, convert to normally distributed
+            #pixel_array = np.log(pixel_array)
+
+            centre = np.floor((256-1)/2)
+
+            # Set all out of range pixels to 0
+            for i in range(pixel_array.shape[0]):
+                for j in range(pixel_array.shape[1]):
+                    arg_dist = round(np.sqrt((centre - i)**2 + (centre - j)**2))
+                    if arg_dist > centre:
+                        pixel_array[i, j] = 0
+
+            # Take log to find normally distributed values
+            # Add epsilon=1e-6 to make sure log is above -inf
+            pixel_array = pixel_array + 1e-3*np.ones(pixel_array.shape)
+            pixel_array = np.log(pixel_array)    
+
             return pixel_array
         
         except:
             return None
 
 
-        '''   
-    def rescale_prior(self):
+  
+    def rescale_prior(self, dataframe, patient_ids):
         
-        holder = pd.DataFrame(columns=["Index", f"{self.col_names[-1]} (Norm)"])
+        patient_intensity_avges = []
+        for patient in patient_ids:
+            temp_pixels_norm = []
+            is_patient_filtered = (self.dataframe['Patient ID'] == patient)
+            patient_slices = dataframe.loc[is_patient_filtered]
+            for i in range(patient_slices.shape[0]):
+                out = self.rescaler(data_element = patient_slices.iloc[i])
+                if out is not None:
+                    temp_pixels_norm.append(out)
 
-        for patient in self.patient_ids:
-            is_patient = (self.dataframe['Patient ID'] == patient)
-            patient_array = self.dataframe[is_patient == True]
+            if len(temp_pixels_norm) > 1:
+                patient_slices = np.stack(temp_pixels_norm).mean(axis=0)
+                patient_intensity_avges.append(patient_slices.ravel())
 
-            temp_array = []
-            for i in range(patient_array.shape[0]):
-                temp_pix = self.rescaler(data_element = patient_array.iloc[i])
-                temp_array.append(temp_pix)
+            elif len(temp_pixels_norm) == 1:
+                patient_slices = np.array(temp_pixels_norm)[0]
+                patient_intensity_avges.append(patient_slices.ravel())
 
-            patient_array = np.stack(temp_array, axis=0)
-            is_patient_idx = np.array(np.where(is_patient)).ravel()
+        patient_intensity_avges = np.array(patient_intensity_avges)
 
-            temp = pd.DataFrame(columns=["Index", f"{self.col_names[-1]} (Norm)"]) #, columns=["Index", f"{self.col_names[-1]} (Norm)"]
-            print(patient_array.shape)
-            temp[f"{self.col_names[-1]} (Norm)"] = patient_array.tolist()
-            temp["Index"] = is_patient_idx.tolist()
+        return patient_intensity_avges
 
-            holder = pd.concat([temp, holder])
-            
-        holder.set_index("Index", inplace = True)
-        holder.sort_index(axis=0, inplace = True)
-        self.dataframe = self.dataframe.join(holder)
-        self.col_names = list(self.dataframe.columns.values)
-        print(self.dataframe)
-        return None
-        ''' 
 
     def prior_loader(self, chunk_size, tag_list=None): #col, func, 
         first_moments_list = []
@@ -409,27 +414,10 @@ class Dataset:
             self.chunk_loadin(chunk_size, chunk_ind=i, tag_list=tag_list)
 
             self.selector(col=1, func=select_slice)
-            #self.rescale_prior()
+            patient_intensity_avg = self.rescale_prior(dataframe=self.dataframe, patient_ids=self.patient_ids)
 
-            patient_intensity_avg = []
-
-            for patient in self.patient_ids:
-                temp_pixels_norm = []
-                is_patient_filtered = (self.dataframe['Patient ID'] == patient)
-                patient_slices = self.dataframe.loc[is_patient_filtered]
-                for i in range(patient_slices.shape[0]):
-                    out = self.rescaler(data_element = patient_slices.iloc[i])
-                    if out is not None:
-                        temp_pixels_norm.append(out)
-
-                try:
-                    patient_slices = np.stack(temp_pixels_norm).mean(axis=0)
-                    print(patient_slices.shape)
-                    patient_intensity_avg.append(patient_slices.ravel())
-                except:
-                    continue
-
-            patient_intensity_avg = np.array(patient_intensity_avg)
+            # Normalize to 0 -> 1 range before calculating statistics (optional)
+            #patient_intensity_avg = patient_intensity_avg/(patient_intensity_avg.max() - patient_intensity_avg.min())     
 
             self.actual_chunk_size = patient_intensity_avg.shape[0]
             chunk_size_list.append(self.actual_chunk_size)
@@ -450,6 +438,7 @@ class Dataset:
 
             # Second Moment Update
             print("Second Moment Update Progress:")
+
             for sub_i in tqdm(range(256)):
                 sec_st_i = 256*sub_i
                 sec_en_i = 256*sub_i + 256
@@ -464,9 +453,10 @@ class Dataset:
                     second_moment_path[sec_st_i : sec_en_i,  sec_st_j : sec_en_j] = temp_second_moment
 
             print(f"Current second mom. range: {second_moment_path.min()} -> {second_moment_path.max()}")    
-            #break
-                
+ 
         return None
+    
+
 
 def select_slice(val):
     bool = (val[2] < -125.0) and (val[2] > -135.0)
